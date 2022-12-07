@@ -7,7 +7,6 @@ from tqdm import tqdm
 import re
 from bs4 import BeautifulSoup
 from collections import Counter,defaultdict
-import pickle
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.feature_extraction.text import TfidfVectorizer,CountVectorizer
@@ -22,11 +21,13 @@ import dash
 import dash_bootstrap_components as dbc
 from dash_extensions import Lottie
 
-with open("model.pkl","rb") as f:
-    lr = pickle.load(f)
+# with open("model.pkl","rb") as f:
+#     lr = pickle.load(f)
 
-with open("wordvectorizer.pkl","rb") as f:
-    tfidf = pickle.load(f)
+# with open("wordvectorizer.pkl","rb") as f:
+#     tfidf = pickle.load(f)
+df = pd.read_json("Sarcasm_Headlines_Dataset.json",lines=True)
+y = df['is_sarcastic'].values
 
 def review_to_words(review):
     nltk.download("stopwords", quiet=True)
@@ -39,6 +40,91 @@ def review_to_words(review):
     words = [PorterStemmer().stem(w) for w in words] # stem
     
     return words
+
+words_all = [review_to_words(review) for review in tqdm(df['headline'])]
+
+def create_vocab(text,y_all):
+    ind = 0
+    vocab_all = {}
+    doc_freq = defaultdict(set)
+    term_freq = Counter()
+    n_docs = len(text)
+    dtm = defaultdict( lambda: defaultdict(Counter))
+    for i,review in enumerate(text):
+        if (i+1) % 2000 == 0:
+            print(f"Processing review number {i+1}...")
+        label = y_all[i]
+        for word in review:
+            if word not in vocab_all:
+                vocab_all[word] = ind
+                ind += 1
+            doc_freq[word].add(i)
+            term_freq[word] += 1
+        for w1,w2 in zip(review,review[1:]):
+            word = w1+" "+w2
+            if word not in vocab_all:
+                vocab_all[word] = ind
+                ind += 1
+            doc_freq[word].add(i)
+            term_freq[word] += 1
+        for w1,w2,w3 in zip(review,review[1:],review[2:]):
+            word = w1+" "+w2+" "+w3
+            if word not in vocab_all:
+                vocab_all[word] = ind
+                ind += 1
+            doc_freq[word].add(i)
+            term_freq[word] += 1
+    valid_vocab = {}
+    ind = 0
+    print("Processing valid_vocab...")
+    for word in vocab_all:
+        if len(doc_freq[word]) > n_docs*0.5 or len(doc_freq[word]) < n_docs*0.001 or term_freq[word] < 10:
+            continue
+        valid_vocab[word] = ind
+        ind += 1
+    
+    for i,review in enumerate(text):
+        if (i+1) % 2000 == 0:
+            print(f"Processing review number {i+1} for dtm...")
+        label = y_all[i]
+        for word in review:
+            if word not in valid_vocab:
+                continue
+            dtm[word][label][i] += 1
+        for w1,w2 in zip(review,review[1:]):
+            word = w1+" "+w2
+            if word not in valid_vocab:
+                continue
+            dtm[word][label][i] += 1
+        for w1,w2,w3 in zip(review,review[1:],review[2:]):
+            word = w1+" "+w2+" "+w3
+            if word not in valid_vocab:
+                continue
+            dtm[word][label][i] += 1
+    
+    return valid_vocab,dtm
+
+valid_vocab,dtm = create_vocab(words_all,y)
+train = df[['headline']].copy()
+
+n_train = train.shape[0]
+words_train = [None]*n_train
+for i,review in enumerate(train['headline']):
+	if (i+1) % 5000 == 0:
+		print(f"Tokenizing review {i+1}...")
+	words_train[i] = review_to_words(review) 
+#words_train = [review_to_words(review) for review in tqdm(train['review'])]
+
+
+
+tfidf = TfidfVectorizer(vocabulary=valid_vocab,ngram_range=(1,3))
+X_train = tfidf.fit_transform([" ".join(review) for review in words_train])
+
+
+lr = LogisticRegression(solver='liblinear',penalty='l2',C=5,random_state=5064)
+lr.fit(X_train,y)
+
+y_prob = lr.predict_proba(X_train)[:,1]
 
 def predict(new_review,wordvectorizer,model):
     words_test = [review_to_words(new_review)]
